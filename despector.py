@@ -62,7 +62,12 @@ class Main(QScrollArea):
         self.setWidgetResizable(True)
         self.setAcceptDrops(True)
         self.title = 'despector'
-        self.startSegmentation.connect(self.doSegmentation)
+        #self.startSegmentation.connect(self.doSegmentation)
+        self.segmentationProcess = doSegmentationProcess()
+        
+        self.startSegmentation.connect(self.segmentationProcess.start)
+        self.segmentationProcess.finished.connect(self.onSegmentationFinished)
+
 
         self.width = 1920
         self.height = 1080
@@ -93,7 +98,8 @@ class Main(QScrollArea):
         self.labelA.setFont(font)
         self.show()
         self.outcomeGraphics = outcomeGraphics(QtGui.QImage(eimg.flatten(), eimg.shape[1], eimg.shape[0], QtGui.QImage.Format_RGB888),self)
-    
+        self.outcomeGraphics.setVisible(False)
+
     def dropEvent(self, event):
         event.accept()
         mimeData = event.mimeData()
@@ -118,6 +124,12 @@ class Main(QScrollArea):
             imageSrc = mimeData.urls()[0].toString().replace('file://',"")
             img = cv2.imread(imageSrc)
             self.img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB, img)
+
+            print("accept Drop.")
+            self.segmentationProcess.setImg(self.img)
+            self.targetImage.setVisible(True)
+            self.targetImage.updateImage(qimage2ndarray.array2qimage(self.img))
+            self.segmentationProcess.rect = None
 
 
             self.startSegmentation.emit()
@@ -149,8 +161,18 @@ class Main(QScrollArea):
             #indexnet = indexNetMatting(copy.deepcopy(self.img))
             #self.outcomes[0].updateImage(QtGui.QImage(indexnet.flatten(), indexnet.shape[1], indexnet.shape[0], QtGui.QImage.Format_RGB888))
             #self.outcomes[0].setVisible(True)
+            self.segmentationProcess.setRect(self.targetImage.scene.rect)
+            self.segmentationProcess.setImg(self.img)
             self.startSegmentation.emit()
+
+    def onSegmentationFinished(self):
+        print("segmentation Finished")
+        self.labelA.setVisible(False)
+        self.outcomeGraphics.updateImage(self.segmentationProcess.resultQImage)
         
+        
+    
+"""        
     @pyqtSlot()
     def doSegmentation(self):
         if self.targetImage.scene.rect is not None:
@@ -178,7 +200,7 @@ class Main(QScrollArea):
             self.outcomeGraphics.updateImage(qimage2ndarray.array2qimage(indexnet))
 
         else:
-            self.targetImage.updateImage(cv2pixmap(self.img))
+            self.targetImage.updateImage(qimage2ndarray.array2qimage(self.img))
 
             self.targetImage.setVisible(True)
 
@@ -187,14 +209,26 @@ class Main(QScrollArea):
             self.outcomeGraphics.updateImage(qimage2ndarray.array2qimage(indexnet))
             
             self.labelA.setVisible(False)
-            
+"""
+
+
 #セグメンテーションの処理がクソ重いのでスレッド化
 class doSegmentationProcess(QThread):
-    def __init__(self, parent=None):
+    isFinished = pyqtSignal()
+    def __init__(self, parent=None, rect = None, imgNdarray = None):
         QtCore.QThread.__init__(self, parent)
 
         self.mutex = QtCore.QMutex()
+        self.rect = rect
+        self.img = imgNdarray
         self.stopped = False
+        self.resultQImage = None
+
+    def setImg(self,imgNdarray):
+        self.img = imgNdarray
+    
+    def setRect(self,rect):
+        self.rect = rect
 
     def __del__(self):
         self.stop()
@@ -209,13 +243,32 @@ class doSegmentationProcess(QThread):
             self.stopped = False
 
     def run(self):
+        print("do Segmentation")
+        if self.stopped == True:
+            return
 
-        countNum = 0
-        while not self.stopped:
-            self.printThread.emit(str(countNum))
-            countNum += 1
-            time.sleep(1)
+        if self.rect is not None:
+            x,y,height,width = int(self.rect.x()),int(self.rect.y()),int(self.rect.height()),int(self.rect.width())
 
+            print(self.rect)
+    
+            
+            print(x)
+            print(y)
+            print(height)
+            print(width)
+            print(self.img.dtype)
+            
+            z = self.img[y:min(height+y,self.img.shape[0]),x:min(width+x,self.img.shape[1])]
+            print(z.shape)
+            print(z.dtype)
+            indexnet = indexNetMatting(z)
+            self.resultQImage = qimage2ndarray.array2qimage(indexnet)
+
+        else:
+            indexnet = indexNetMatting(copy.deepcopy(self.img))
+            print("indexnet Finished")
+            self.resultQImage = qimage2ndarray.array2qimage(indexnet)
     
 
 
@@ -413,38 +466,10 @@ def indexNetMatting(img):
     mask = cv2.resize(mask,(w,h))
     img = cv2.resize(img,(w,h))
     print(mask.shape)
-    plt.close()
-    plt.gray()
-    plt.figure(figsize = (20,20))
-    plt.subplot(1,2,1)
-    plt.imshow(img)
-    plt.subplot(1,2,2)
-    plt.imshow(mask)
-    plt.savefig("mask.png")
-    plt.close()
-    
     
     trimap = generateTrimap(mask,kernelSize=(10,10),iterate = 5)
-    plt.close()
-    plt.figure(figsize=(20,20))
-    plt.subplot(1,2,1)
-    plt.imshow(img)
-    plt.subplot(1,2,2)
-    plt.imshow(trimap)
-    
-    plt.savefig("trimap.png")
-
-    #return trimap
-
-
-
 
     with torch.no_grad():
-        #img = np.array(Image.open('./examples/images/beach-747750_1280_2.png'))
-        #ret = img[:,:,:]
-        #trimap = np.array(Image.open('./examples/trimaps/beach-747750_1280_2.png'))
-        #h,w,_ =  img.shape
-
         trimap = np.expand_dims(trimap,axis=2)
         print(trimap.shape)
         img = np.concatenate((img,trimap),axis=2)
@@ -471,15 +496,6 @@ def indexNetMatting(img):
         mask = np.equal(trimap,128).astype(np.float32)
         alpha = (1-mask)*trimap+mask*alpha
         
-        
-       
-        plt.close()
-        plt.subplot(1,2,1)
-        plt.imshow(img)
-        plt.subplot(1,2,2)
-        plt.imshow(trimap)
-        plt.savefig("alpha.png")
-
         print(type(alpha))
         print(type(ret))
 
@@ -488,13 +504,7 @@ def indexNetMatting(img):
 
 
         print(ret.shape)
-        plt.close()
-        plt.imshow(ret)
-        plt.savefig("xx.png")
         ret = ret.astype(float)
-        plt.close()
-        plt.imshow(ret.astype(np.uint8))
-        plt.savefig("x.png")
         
         bg = np.full_like(ret,255)
         bg[:,:,0] = 0
@@ -507,10 +517,8 @@ def indexNetMatting(img):
         ret[:,:,1] = cv2.multiply(ret[:,:,1], alpha)
         ret[:,:,2] = cv2.multiply(ret[:,:,2], alpha)
 
-        plt.close()
-        plt.imshow(ret.astype(np.uint8))
-        plt.savefig("xxxx.png")
 
+        bg[:,:] = chooseBackColor(img)
         bg[:,:,0] = cv2.multiply(bg[:,:,0], 1.0-alpha)
         bg[:,:,1] = cv2.multiply(bg[:,:,1], 1.0-alpha)
         bg[:,:,2] = cv2.multiply(bg[:,:,2], 1.0-alpha)
@@ -519,16 +527,10 @@ def indexNetMatting(img):
 
         print(bg[(bg != 255) & (bg != 0)])
 
-        plt.close()
-        plt.imshow(bg.astype(np.uint8))
-        plt.savefig("bg.png")
         
         outImage = ret+bg
 
         print(ret.shape)
-        plt.close()
-        plt.imshow(np.clip(outImage,0,255))
-        plt.savefig("output.png")
 
         outImage = np.clip(outImage,0,255)
         
@@ -556,47 +558,39 @@ def image_alignment(x, output_stride, odd=False):
 def generateTrimap(mask,kernelSize=(5,5),iterate=1):
     kernel = np.ones(kernelSize,np.uint8)
     eroded = cv2.erode(mask,kernel,iterations = iterate)
-    plt.close()
-    plt.subplot(1,2,1)
-    plt.imshow(mask)
-    plt.subplot(1,2,2)
-    plt.imshow(eroded)
-    plt.savefig("eroded.png")
     dilated = cv2.dilate(mask,kernel,iterations = iterate)
-
-    plt.close()
-    plt.subplot(1,2,1)
-    plt.imshow(mask)
-    plt.subplot(1,2,2)
-    plt.imshow(dilated)
-    plt.savefig("dilated.png")
 
     trimap = np.full(mask.shape,128)
     print(trimap)
-    plt.close()
-    plt.subplot(1,2,1)
-    plt.imshow(mask)
-    plt.subplot(1,2,2)
-    plt.imshow(trimap)
     
     trimap[eroded != 0] = 255
     trimap[dilated == 0] = 0
     print("eroded:"+str(eroded[eroded != 0]))
-    plt.savefig("tri.png")
+    #plt.savefig("tri.png")
     print(trimap[trimap == 128].shape)
     cv2.imwrite('./examples/trimaps/11.png',trimap)
     return trimap
 
 def chooseBackColor(img):
+    print("backcolor")
     includedColorList = []
-    target = array(img)
+
     for i in range(img.shape[0]):
         for j in range(img.shape[1]):
-            includedColorList.append(tuple(target[i][j]))
+            includedColorList.append(tuple(img[i][j]))
 
-    includedColorList = set(includedColorList)
+    includedColorSet = set(includedColorList)
 
-    return (0,0,0)
+    for r in range(256):
+        for g in range(255,0,-1):
+            for b in range(256): 
+                if not ((r,g,b) in includedColorSet):
+                    
+                    return np.array((r,g,b))
+
+    print("backcolor end")
+
+    return np.array((0,0,0))
 
 def qimage2cv(qimage):
     w, h, d = qimage.size().width(), qimage.size().height(), qimage.depth()
